@@ -14,5 +14,4 @@ public class AllDivisors {
         }
         return divisors.stream().mapToInt(i -> i).toArray();
     }
-
 }

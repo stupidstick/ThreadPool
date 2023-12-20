@@ -6,14 +6,15 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.stream.IntStream;
 
 public class PoolManager {
-    private boolean isShutdown = false;
-    private final Thread managerThread;
-    private final Vector<PoolThread> threads = new Vector<>();
-    private final BlockingQueue<PoolThread> freeThreads = new LinkedBlockingQueue<>();
-    private final BlockingQueue<Request> requests = new LinkedBlockingQueue<>();
+    private volatile boolean isShutdown = false;
+    private final Object managerLock = new Object();  //object for synchronizing public methods
+    private final Thread managerThread; //manager thread that distributes requests among pool threads
+    private final Vector<PoolThread> threads = new Vector<>(); //pool threads
+    private final BlockingQueue<PoolThread> freeThreads = new LinkedBlockingQueue<>(); //free thread pool queue
+    private final BlockingQueue<Request> requests = new LinkedBlockingQueue<>(); //queue of requests for processing
 
     public PoolManager(int size) {
-        IntStream.range(0, size).forEach(i -> threads.add(new PoolThread()));
+        IntStream.range(0, size).forEach(i -> threads.add(new PoolThread())); //creating <size> pool threads
         freeThreads.addAll(threads);
         managerThread.start();
     }
@@ -23,40 +24,48 @@ public class PoolManager {
         managerThread = new Thread(() -> {
             while (!isShutdown) {
                 try {
-                    freeThreads.take().executeRequest(requests.take());
+                    freeThreads.take() //wait and take free thread
+                            .executeRequest(requests.take()); //take request and pass it to a thread
                 } catch (Exception ignored) {
                 }
             }
         });
     }
 
-    public void addRequest(Request request) {
-        if (isShutdown) throw new RuntimeException("ThreadPool is shutdown.");
-        try {
-            requests.put(request);
-        } catch (Exception exception) {
-            throw new RuntimeException("Failed to add request to queue.", exception);
+    public synchronized void addRequest(Request request) {
+        synchronized (managerLock) {
+            if (isShutdown) throw new RuntimeException("ThreadPool is shutdown.");
+            try {
+                requests.put(request);
+            } catch (Exception exception) {
+                throw new RuntimeException("Failed to add request to queue.", exception);
+            }
         }
     }
 
-    public void shutdown() {
-        isShutdown = true;
-        managerThread.interrupt();
-        notifyThreads();
-        cancelRequests();
+    public synchronized void shutdown() {
+        synchronized (managerLock) {
+            isShutdown = true;
+            managerThread.interrupt(); //interrupt manager thread to remove the block from freeThreads and requests
+            notifyThreads();
+            cancelRequests();
+        }
     }
 
+    //cancel all requests in the requests queue
     private void cancelRequests() {
         try {
-            while (!requests.isEmpty()) requests.take().onCancel();
+            while (!requests.isEmpty()) requests.take().onCancel(); //
         } catch (Exception ignored) {
         }
     }
 
+    //free thread when execution is complete
     private void freeThread(PoolThread thread) throws InterruptedException {
         freeThreads.put(thread);
     }
 
+    //notify all threads in the pool (used to stop them running)
     private void notifyThreads() {
         threads.forEach(t -> {
             synchronized (t.lockObject) {
@@ -78,12 +87,11 @@ public class PoolManager {
             runnable = () -> {
                 while (!isShutdown) {
                     try {
-                        waitForRequest();
+                        waitForRequest(); //block the thread until the executeRequest() method is called from outside
                         if (request == null) continue;
                         processRequest(request);
                         request = null;
-                        freeThread(this);
-
+                        freeThread(this); //free the pool thread after request completes
                     } catch (InterruptedException ignored) {
                     }
                 }
@@ -105,6 +113,7 @@ public class PoolManager {
                 request.onException();
             }
         }
+
 
         private void waitForRequest() throws InterruptedException {
             synchronized (lockObject) {
